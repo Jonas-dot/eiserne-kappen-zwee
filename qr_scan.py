@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Ticket-Drucker mit Raspberry Pi Tastensteuerung oder Tastatur-Testmodus
+Ticket-Drucker mit Raspberry Pi (64-bit) und GPIO-Tastensteuerung.
+Templates werden aus dem /templates-Ordner geladen.
+Button 5: Template direkt drucken
+Button 6: QR-Code scannen, einfügen, drucken
+Testmodus: Tastatureingaben 1-6 simulieren Buttons
 """
 
 import os
@@ -11,48 +15,27 @@ from datetime import datetime
 
 import cv2
 from pyzbar.pyzbar import decode
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import qrcode
 
 # -------------------------
-# Testmodus auf Mac/PC
+# KONFIGURATION
+
 TEST_MODE = True  # True = Keyboard-Test, False = Raspberry Pi GPIO
+
+TEMPLATE_DIR = "templates"
+OUTPUT_DIR = "output"
+PRINTER_NAME = "Canon_TS5350i_series_2"
+
+# Buttons (BCM-Nummern)
+BUTTON_PINS = {1: 5, 2: 6, 3: 13, 4: 19, 5: 26, 6: 21}
+
+# QR-Code Einstellungen
+QR_SIZE = 180
+QR_INSERT_POS = (800, 850)  # <-- diese Position kannst du anpassen
 
 if not TEST_MODE:
     import RPi.GPIO as GPIO
-
-# -------------------------
-# Konfiguration
-
-OUTPUT_DIR = "output"
-OUTPUT_BASENAME = "ticket"
-
-# QR-Code Positionierung auf A6
-QR_SIZE = 180
-A6_WIDTH = 1240
-A6_HEIGHT = 1748
-BASE_QR_POS = ((A6_WIDTH - QR_SIZE) // 2, (A6_HEIGHT - QR_SIZE) // 2)
-QR_OFFSET_X = 115
-QR_OFFSET_Y = 820
-QR_INSERT_POS = (BASE_QR_POS[0] + QR_OFFSET_X, BASE_QR_POS[1] + QR_OFFSET_Y)
-
-# Texte für Knöpfe 1-4
-BUTTON_TEXTS = {
-    1: "Waldseite",
-    2: "Gegengerade",
-    3: "Wuhleseite",
-    4: "Haupttribüne",
-}
-
-# Font- und Textparameter
-FONT_PATH = "fonts/Arial.ttf"
-
-FONT_SIZE = 60  # Textgröße
-TEXT_X_OFFSET = 80  # Verschiebung X
-TEXT_Y_OFFSET = -630  # Verschiebung Y
-
-if not TEST_MODE:
-    BUTTON_PINS = {1: 5, 2: 6, 3: 13, 4: 19, 5: 26, 6: 21}
 
 # -------------------------
 # Hilfsfunktionen
@@ -67,120 +50,14 @@ def timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def create_text_ticket(
-    text, out_path, font_size=FONT_SIZE, x_offset=TEXT_X_OFFSET, y_offset=TEXT_Y_OFFSET
-):
-    """Erstellt ein reines Text-Ticket, 270° gedreht, ohne dass unten etwas abgeschnitten wird."""
-    img = Image.new("RGB", (A6_WIDTH, A6_HEIGHT), (255, 255, 255))
-    font = ImageFont.truetype(FONT_PATH, font_size)
-
-    # Textgröße inkl. Descent ermitteln
-    draw_dummy = ImageDraw.Draw(img)
-    bbox = draw_dummy.textbbox((0, 0), text, font=font)
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-
-    ascent, descent = font.getmetrics()
-    h_total = h + descent  # Gesamthöhe inklusive Descent
-
-    # Textbild erstellen
-    text_img = Image.new("RGBA", (w, h_total), (255, 255, 255, 0))
-    draw_text = ImageDraw.Draw(text_img)
-    draw_text.text((0, 0), text, font=font, fill=(0, 0, 0))
-
-    # 270° drehen
-    rotated_text = text_img.rotate(270, expand=True)
-
-    # Position berechnen
-    pos = (
-        (A6_WIDTH - rotated_text.width) // 2 + x_offset,
-        (A6_HEIGHT - rotated_text.height) // 2 + y_offset,
-    )
-
-    img.paste(rotated_text, pos, rotated_text)
-    img.save(out_path)
-    return out_path
-
-
-def create_qr_text_ticket(
-    qr_text,
-    plain_text,
-    out_path,
-    font_size=FONT_SIZE,
-    x_offset=TEXT_X_OFFSET,
-    y_offset=TEXT_Y_OFFSET,
-):
-    """Erstellt ein Ticket mit QR-Code + Text"""
-    img = Image.new("RGB", (A6_WIDTH, A6_HEIGHT), (255, 255, 255))
-
-    # QR-Code
-    qr_img = qrcode.make(qr_text).convert("RGB")
-    qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
-    img.paste(qr_img, QR_INSERT_POS)
-
-    # Text darunter
-    font = ImageFont.truetype(FONT_PATH, font_size)
-    draw_dummy = ImageDraw.Draw(img)
-    bbox = draw_dummy.textbbox((0, 0), plain_text, font=font)
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-
-    text_img = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-    draw_text = ImageDraw.Draw(text_img)
-    draw_text.text((0, 0), plain_text, font=font, fill=(0, 0, 0))
-
-    rotated_text = text_img.rotate(270, expand=True)
-    pos = (
-        (A6_WIDTH - rotated_text.width) // 2 + x_offset,
-        QR_INSERT_POS[1] + QR_SIZE + 20 + y_offset,
-    )
-    img.paste(rotated_text, pos, rotated_text)
-
-    img.save(out_path)
-    return out_path
-
-
-def send_to_printer(filepath):
-    system = platform.system()
-    if system in ("Linux", "Darwin"):
-        try:
-            subprocess.run(
-                [
-                    "lp",
-                    "-d",
-                    "Canon_TS5350i_series_2",
-                    "-o",
-                    "media=A6",
-                    "-o",
-                    "media-source=rear",
-                    "-o",
-                    "MediaType=photographic",
-                    "-o",
-                    "print-quality=3",
-                    "-o",
-                    "resolution=600dpi",
-                    filepath,
-                ],
-                check=True,
-            )
-            print("Druckauftrag gesendet:", filepath)
-        except Exception as e:
-            print("Fehler beim Drucken:", e)
-    elif system == "Windows":
-        try:
-            import os
-
-            os.startfile(os.path.abspath(filepath), "print")
-        except Exception as e:
-            print("Fehler beim Drucken unter Windows:", e)
-
-
 def scan_qr_code():
+    """Startet Kamera und liest QR-Code ein"""
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Kamera konnte nicht geöffnet werden.")
         return None
-    print("QR-Code Kamera gestartet. Halte QR-Code vor die Kamera.")
+
+    print("QR-Code Scan gestartet – halte Code vor die Kamera (q zum Abbrechen).")
     qr_text = None
     while True:
         ret, frame = cap.read()
@@ -201,71 +78,160 @@ def scan_qr_code():
     return None
 
 
+def overlay_qr_on_template(template_path, qr_text, out_path):
+    """Fügt QR-Code an vorgegebener Position in das Template ein."""
+    img = Image.open(template_path).convert("RGB")
+    qr_img = qrcode.make(qr_text).convert("RGB")
+    qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
+    img.paste(qr_img, QR_INSERT_POS)
+    img.save(out_path)
+    return out_path
+
+
+def send_to_printer(filepath):
+    """Schickt Datei an Drucker über CUPS (lp)."""
+    system = platform.system()
+    if system in ("Linux", "Darwin"):
+        try:
+            subprocess.run(
+                [
+                    "lp",
+                    "-d",
+                    PRINTER_NAME,
+                    "-o",
+                    "media=A6",
+                    "-o",
+                    "media-source=rear",
+                    "-o",
+                    "MediaType=photographic",
+                    "-o",
+                    "print-quality=3",
+                    "-o",
+                    "resolution=600dpi",
+                    filepath,
+                ],
+                check=True,
+            )
+            print("Druckauftrag gesendet:", filepath)
+            return True
+        except Exception as e:
+            print("Fehler beim Drucken:", e)
+            return False
+    elif system == "Windows":
+        try:
+            os.startfile(os.path.abspath(filepath), "print")
+            return True
+        except Exception as e:
+            print("Fehler beim Drucken unter Windows:", e)
+            return False
+
+
 def delete_file(filepath):
-    try:
-        os.remove(filepath)
-        print("Datei gelöscht:", filepath)
-    except Exception as e:
-        print("Fehler beim Löschen der Datei:", e)
+    """Löscht die Datei, falls vorhanden"""
+    if filepath and os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+            print("Datei gelöscht:", filepath)
+        except Exception as e:
+            print("Fehler beim Löschen der Datei:", e)
 
 
 # -------------------------
-# Hauptlogik
+# HAUPTLOGIK
 
 
 def main():
     make_output_dir(OUTPUT_DIR)
-    selected_text = None
 
     if not TEST_MODE:
         GPIO.setmode(GPIO.BCM)
         for pin in BUTTON_PINS.values():
             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
+    selected_template = None
+    templates = {
+        1: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_waldseite.png"),
+        2: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_gegengerade.png"),
+        3: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_wuhleseite.png"),
+        4: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_haupttribuene.png"),
+    }
+
+    mode_text = "Testmodus (Tastatur) aktiviert." if TEST_MODE else "GPIO-Modus"
+    print(f"Ticket-Drucker gestartet. {mode_text}")
     print(
-        "Starte Ticket-Drucker (Testmodus)"
-        if TEST_MODE
-        else "Starte Ticket-Drucker (GPIO)"
+        "Tasten 1–4: Template wählen | Taste 5: Direktdruck | Taste 6: QR-Scan + Druck"
     )
 
     try:
         while True:
+            filename = None  # immer neu initialisieren
             if TEST_MODE:
-                key = input("Drücke 1-6 zum Testen (q=quit): ")
+                key = input("Drücke 1-6 (q=Beenden): ")
                 if key == "q":
                     break
                 if key in ["1", "2", "3", "4"]:
-                    selected_text = BUTTON_TEXTS[int(key)]
-                    print(f"Text ausgewählt: {selected_text}")
+                    selected_template = templates[int(key)]
+                    print(f"Template ausgewählt: {selected_template}")
                 elif key == "5":
-                    if selected_text:
-                        filename = os.path.join(
-                            OUTPUT_DIR, f"{OUTPUT_BASENAME}_{timestamp()}.png"
-                        )
-                        create_text_ticket(selected_text, filename)
-                        send_to_printer(filename)
-                        print("Text-Ticket gedruckt.")
+                    if selected_template:
+                        filename = os.path.join(OUTPUT_DIR, f"ticket_{timestamp()}.png")
+                        Image.open(selected_template).save(filename)
+                        if send_to_printer(filename):
+                            delete_file(filename)
                     else:
-                        print("Kein Text ausgewählt.")
+                        print("Bitte zuerst Template wählen (1–4).")
                 elif key == "6":
-                    if selected_text:
+                    if selected_template:
                         qr_text = scan_qr_code()
                         if qr_text:
                             filename = os.path.join(
-                                OUTPUT_DIR, f"{OUTPUT_BASENAME}_{timestamp()}.png"
+                                OUTPUT_DIR, f"ticket_qr_{timestamp()}.png"
                             )
-                            create_qr_text_ticket(qr_text, selected_text, filename)
-                            send_to_printer(filename)
-
-                            print("QR+Text-Ticket gedruckt.")
+                            overlay_qr_on_template(selected_template, qr_text, filename)
+                            if send_to_printer(filename):
+                                delete_file(filename)
                         else:
                             print("Kein QR-Code erkannt.")
-                    else:
-                        print("Kein Text ausgewählt.")
-                delete_file(filename)  # Datei nach dem Druck löschen
+                else:
+                    print("Ungültige Eingabe. 1–6 oder q zum Beenden.")
             else:
-                # GPIO-Logik Raspberry Pi hier implementieren
-                pass
+                # GPIO-Modus
+                for num, pin in BUTTON_PINS.items():
+                    if GPIO.input(pin) == GPIO.LOW:
+                        time.sleep(0.2)  # Entprellen
+                        if num in [1, 2, 3, 4]:
+                            selected_template = templates[num]
+                            print(f"Template ausgewählt: {selected_template}")
+                        elif num == 5:
+                            if selected_template:
+                                filename = os.path.join(
+                                    OUTPUT_DIR, f"ticket_{timestamp()}.png"
+                                )
+                                Image.open(selected_template).save(filename)
+                                if send_to_printer(filename):
+                                    delete_file(filename)
+                            else:
+                                print("Bitte zuerst Template wählen (1–4).")
+                        elif num == 6:
+                            if selected_template:
+                                qr_text = scan_qr_code()
+                                if qr_text:
+                                    filename = os.path.join(
+                                        OUTPUT_DIR, f"ticket_qr_{timestamp()}.png"
+                                    )
+                                    overlay_qr_on_template(
+                                        selected_template, qr_text, filename
+                                    )
+                                    if send_to_printer(filename):
+                                        delete_file(filename)
+                                else:
+                                    print("Kein QR-Code erkannt.")
+                            else:
+                                print("Bitte zuerst Template wählen (1–4).")
+                        while GPIO.input(pin) == GPIO.LOW:
+                            time.sleep(0.1)  # warten bis losgelassen
+            if not TEST_MODE:
+                time.sleep(0.05)
 
     except KeyboardInterrupt:
         print("Beendet.")
