@@ -32,7 +32,10 @@ BUTTON_PINS = {1: 5, 2: 6, 3: 13, 4: 19, 5: 26, 6: 21}
 
 # QR-Code Einstellungen
 QR_SIZE = 180
-QR_INSERT_POS = (800, 850)  # <-- diese Position kannst du anpassen
+QR_INSERT_POS = (800, 850)  # Position des QR-Codes auf dem Ticket
+
+# Template Y-Offset in Pixeln (verschiebt Template nach unten)
+TEMPLATE_Y_OFFSET = 20  # z.B. 20 Pixel nach unten
 
 if not TEST_MODE:
     import RPi.GPIO as GPIO
@@ -78,9 +81,19 @@ def scan_qr_code():
     return None
 
 
-def overlay_qr_on_template(template_path, qr_text, out_path):
-    """Fügt QR-Code an vorgegebener Position in das Template ein."""
+def overlay_qr_on_template(
+    template_path, qr_text, out_path, y_offset=TEMPLATE_Y_OFFSET
+):
+    """Fügt QR-Code an vorgegebener Position in das Template ein und verschiebt Template Y"""
     img = Image.open(template_path).convert("RGB")
+
+    # Template verschieben
+    if y_offset != 0:
+        width, height = img.size
+        new_img = Image.new("RGB", (width, height + y_offset), (255, 255, 255))
+        new_img.paste(img, (0, y_offset))
+        img = new_img
+
     qr_img = qrcode.make(qr_text).convert("RGB")
     qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
     img.paste(qr_img, QR_INSERT_POS)
@@ -89,10 +102,11 @@ def overlay_qr_on_template(template_path, qr_text, out_path):
 
 
 def send_to_printer(filepath):
-    """Schickt Datei an Drucker über CUPS (lp)."""
+    """Schickt Datei an Drucker über CUPS (lp)"""
     system = platform.system()
     if system in ("Linux", "Darwin"):
         try:
+            # Draft / schnelle Qualität
             subprocess.run(
                 [
                     "lp",
@@ -105,9 +119,11 @@ def send_to_printer(filepath):
                     "-o",
                     "MediaType=photographic",
                     "-o",
-                    "print-quality=3",
+                    "print-quality=1",  # Draft / Low
                     "-o",
-                    "resolution=600dpi",
+                    "resolution=300dpi",  # schneller
+                    "-o",
+                    "orientation-requested=4",  # Hochformat
                     filepath,
                 ],
                 check=True,
@@ -164,7 +180,7 @@ def main():
 
     try:
         while True:
-            filename = None  # immer neu initialisieren
+            filename = None
             if TEST_MODE:
                 key = input("Drücke 1-6 (q=Beenden): ")
                 if key == "q":
@@ -175,7 +191,10 @@ def main():
                 elif key == "5":
                     if selected_template:
                         filename = os.path.join(OUTPUT_DIR, f"ticket_{timestamp()}.png")
-                        Image.open(selected_template).save(filename)
+                        # Template Y verschoben
+                        overlay_qr_on_template(
+                            selected_template, "", filename, y_offset=TEMPLATE_Y_OFFSET
+                        )
                         if send_to_printer(filename):
                             delete_file(filename)
                     else:
@@ -187,7 +206,12 @@ def main():
                             filename = os.path.join(
                                 OUTPUT_DIR, f"ticket_qr_{timestamp()}.png"
                             )
-                            overlay_qr_on_template(selected_template, qr_text, filename)
+                            overlay_qr_on_template(
+                                selected_template,
+                                qr_text,
+                                filename,
+                                y_offset=TEMPLATE_Y_OFFSET,
+                            )
                             if send_to_printer(filename):
                                 delete_file(filename)
                         else:
@@ -207,7 +231,12 @@ def main():
                                 filename = os.path.join(
                                     OUTPUT_DIR, f"ticket_{timestamp()}.png"
                                 )
-                                Image.open(selected_template).save(filename)
+                                overlay_qr_on_template(
+                                    selected_template,
+                                    "",
+                                    filename,
+                                    y_offset=TEMPLATE_Y_OFFSET,
+                                )
                                 if send_to_printer(filename):
                                     delete_file(filename)
                             else:
@@ -220,7 +249,10 @@ def main():
                                         OUTPUT_DIR, f"ticket_qr_{timestamp()}.png"
                                     )
                                     overlay_qr_on_template(
-                                        selected_template, qr_text, filename
+                                        selected_template,
+                                        qr_text,
+                                        filename,
+                                        y_offset=TEMPLATE_Y_OFFSET,
                                     )
                                     if send_to_printer(filename):
                                         delete_file(filename)
@@ -229,7 +261,7 @@ def main():
                             else:
                                 print("Bitte zuerst Template wählen (1–4).")
                         while GPIO.input(pin) == GPIO.LOW:
-                            time.sleep(0.1)  # warten bis losgelassen
+                            time.sleep(0.1)
             if not TEST_MODE:
                 time.sleep(0.05)
 
