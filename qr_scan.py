@@ -12,6 +12,7 @@ import platform
 import subprocess
 import time
 from datetime import datetime
+import logging
 
 import cv2
 from pyzbar.pyzbar import decode
@@ -25,20 +26,45 @@ TEST_MODE = True  # True = Keyboard-Test, False = Raspberry Pi GPIO
 
 TEMPLATE_DIR = "templates"
 OUTPUT_DIR = "output"
-PRINTER_NAME = "Canon_TS5350i_series_2"
+LOG_DIR = "logs"
+LOG_FILE = os.path.join(LOG_DIR, "statistics.log")
+
+PRINTER_NAME = "Canon_TS5350i_series_USB"
 
 # Buttons (BCM-Nummern)
 BUTTON_PINS = {1: 5, 2: 6, 3: 13, 4: 19, 5: 26, 6: 21}
 
 # QR-Code Einstellungen
 QR_SIZE = 180
-QR_INSERT_POS = (800, 850)  # Position des QR-Codes auf dem Ticket
+QR_INSERT_POS = (1540, 255)  # Position des QR-Codes auf dem Ticket
 
 # Template Y-Offset in Pixeln (verschiebt Template nach unten)
 TEMPLATE_Y_OFFSET = 20  # z.B. 20 Pixel nach unten
 
 if not TEST_MODE:
     import RPi.GPIO as GPIO
+
+# -------------------------
+# LOGGING
+
+
+def init_logger():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    print(f"Logging aktiviert → {LOG_FILE}")
+
+
+def log_event(level, message):
+    if level == "error":
+        logging.error(message)
+    else:
+        logging.info(message)
+
 
 # -------------------------
 # Hilfsfunktionen
@@ -58,6 +84,7 @@ def scan_qr_code():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Kamera konnte nicht geöffnet werden.")
+        log_event("error", "Kamera konnte nicht geöffnet werden.")
         return None
 
     print("QR-Code Scan gestartet – halte Code vor die Kamera (q zum Abbrechen).")
@@ -94,9 +121,10 @@ def overlay_qr_on_template(
         new_img.paste(img, (0, y_offset))
         img = new_img
 
-    qr_img = qrcode.make(qr_text).convert("RGB")
-    qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
-    img.paste(qr_img, QR_INSERT_POS)
+    if qr_text:
+        qr_img = qrcode.make(qr_text).convert("RGB")
+        qr_img = qr_img.resize((QR_SIZE, QR_SIZE))
+        img.paste(qr_img, QR_INSERT_POS)
     img.save(out_path)
     return out_path
 
@@ -106,7 +134,6 @@ def send_to_printer(filepath):
     system = platform.system()
     if system in ("Linux", "Darwin"):
         try:
-            # Draft / schnelle Qualität
             subprocess.run(
                 [
                     "lp",
@@ -117,7 +144,7 @@ def send_to_printer(filepath):
                     "-o",
                     "media-source=rear",
                     "-o",
-                    "MediaType=photographic",
+                    "MediaType=plain",
                     "-o",
                     "print-quality=1",  # Draft / Low
                     "-o",
@@ -132,6 +159,7 @@ def send_to_printer(filepath):
             return True
         except Exception as e:
             print("Fehler beim Drucken:", e)
+            log_event("error", f"Druckfehler: {e}")
             return False
     elif system == "Windows":
         try:
@@ -139,6 +167,7 @@ def send_to_printer(filepath):
             return True
         except Exception as e:
             print("Fehler beim Drucken unter Windows:", e)
+            log_event("error", f"Druckfehler (Windows): {e}")
             return False
 
 
@@ -150,6 +179,7 @@ def delete_file(filepath):
             print("Datei gelöscht:", filepath)
         except Exception as e:
             print("Fehler beim Löschen der Datei:", e)
+            log_event("error", f"Fehler beim Löschen: {e}")
 
 
 # -------------------------
@@ -158,6 +188,7 @@ def delete_file(filepath):
 
 def main():
     make_output_dir(OUTPUT_DIR)
+    init_logger()
 
     if not TEST_MODE:
         GPIO.setmode(GPIO.BCM)
@@ -166,10 +197,22 @@ def main():
 
     selected_template = None
     templates = {
-        1: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_waldseite.png"),
-        2: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_gegengerade.png"),
-        3: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_wuhleseite.png"),
-        4: os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_haupttribuene.png"),
+        1: (
+            "Waldseite",
+            os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_waldseite.png"),
+        ),
+        2: (
+            "Gegengerade",
+            os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_gegengerade.png"),
+        ),
+        3: (
+            "Wuhleseite",
+            os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_wuhleseite.png"),
+        ),
+        4: (
+            "Haupttribüne",
+            os.path.join(TEMPLATE_DIR, "ws_eintrittskarte_gladbach_haupttribuene.png"),
+        ),
     }
 
     mode_text = "Testmodus (Tastatur) aktiviert." if TEST_MODE else "GPIO-Modus"
@@ -187,79 +230,67 @@ def main():
                     break
                 if key in ["1", "2", "3", "4"]:
                     selected_template = templates[int(key)]
-                    print(f"Template ausgewählt: {selected_template}")
-                elif key == "5":
-                    if selected_template:
-                        filename = os.path.join(OUTPUT_DIR, f"ticket_{timestamp()}.png")
-                        # Template Y verschoben
-                        overlay_qr_on_template(
-                            selected_template, "", filename, y_offset=TEMPLATE_Y_OFFSET
-                        )
-                        if send_to_printer(filename):
-                            delete_file(filename)
-                    else:
+                    print(f"Template ausgewählt: {selected_template[0]}")
+                elif key in ["5", "6"]:
+                    if not selected_template:
                         print("Bitte zuerst Template wählen (1–4).")
-                elif key == "6":
-                    if selected_template:
-                        qr_text = scan_qr_code()
-                        if qr_text:
-                            filename = os.path.join(
-                                OUTPUT_DIR, f"ticket_qr_{timestamp()}.png"
-                            )
-                            overlay_qr_on_template(
-                                selected_template,
-                                qr_text,
-                                filename,
-                                y_offset=TEMPLATE_Y_OFFSET,
-                            )
-                            if send_to_printer(filename):
-                                delete_file(filename)
-                        else:
-                            print("Kein QR-Code erkannt.")
+                        continue
+
+                    sector_name, template_path = selected_template
+                    qr_mode = key == "6"
+                    qr_text = scan_qr_code() if qr_mode else ""
+
+                    filename = os.path.join(OUTPUT_DIR, f"ticket_{timestamp()}.png")
+                    overlay_qr_on_template(
+                        template_path, qr_text, filename, y_offset=TEMPLATE_Y_OFFSET
+                    )
+
+                    if send_to_printer(filename):
+                        log_event(
+                            "info",
+                            f"Ticket gedruckt: Sektor={sector_name} | QR={qr_mode}",
+                        )
+                        delete_file(filename)
+                    else:
+                        log_event(
+                            "error", f"Druckfehler: Sektor={sector_name} | QR={qr_mode}"
+                        )
                 else:
                     print("Ungültige Eingabe. 1–6 oder q zum Beenden.")
             else:
                 # GPIO-Modus
                 for num, pin in BUTTON_PINS.items():
                     if GPIO.input(pin) == GPIO.LOW:
-                        time.sleep(0.2)  # Entprellen
+                        time.sleep(0.2)
                         if num in [1, 2, 3, 4]:
                             selected_template = templates[num]
-                            print(f"Template ausgewählt: {selected_template}")
-                        elif num == 5:
-                            if selected_template:
-                                filename = os.path.join(
-                                    OUTPUT_DIR, f"ticket_{timestamp()}.png"
+                            print(f"Template ausgewählt: {selected_template[0]}")
+                        elif num in [5, 6] and selected_template:
+                            sector_name, template_path = selected_template
+                            qr_mode = num == 6
+                            qr_text = scan_qr_code() if qr_mode else ""
+
+                            filename = os.path.join(
+                                OUTPUT_DIR, f"ticket_{timestamp()}.png"
+                            )
+                            overlay_qr_on_template(
+                                template_path,
+                                qr_text,
+                                filename,
+                                y_offset=TEMPLATE_Y_OFFSET,
+                            )
+
+                            if send_to_printer(filename):
+                                log_event(
+                                    "info",
+                                    f"Ticket gedruckt: Sektor={sector_name} | QR={qr_mode}",
                                 )
-                                overlay_qr_on_template(
-                                    selected_template,
-                                    "",
-                                    filename,
-                                    y_offset=TEMPLATE_Y_OFFSET,
+                                delete_file(filename)
+                            else:
+                                log_event(
+                                    "error",
+                                    f"Druckfehler: Sektor={sector_name} | QR={qr_mode}",
                                 )
-                                if send_to_printer(filename):
-                                    delete_file(filename)
-                            else:
-                                print("Bitte zuerst Template wählen (1–4).")
-                        elif num == 6:
-                            if selected_template:
-                                qr_text = scan_qr_code()
-                                if qr_text:
-                                    filename = os.path.join(
-                                        OUTPUT_DIR, f"ticket_qr_{timestamp()}.png"
-                                    )
-                                    overlay_qr_on_template(
-                                        selected_template,
-                                        qr_text,
-                                        filename,
-                                        y_offset=TEMPLATE_Y_OFFSET,
-                                    )
-                                    if send_to_printer(filename):
-                                        delete_file(filename)
-                                else:
-                                    print("Kein QR-Code erkannt.")
-                            else:
-                                print("Bitte zuerst Template wählen (1–4).")
                         while GPIO.input(pin) == GPIO.LOW:
                             time.sleep(0.1)
             if not TEST_MODE:
